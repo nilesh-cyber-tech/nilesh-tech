@@ -4,6 +4,7 @@ from scapy.all import sniff, IP, TCP, UDP
 from prometheus_client import start_http_server, Counter, Gauge
 import time
 import mysql.connector
+import subprocess
 
 # Database settings
 db_config = {
@@ -11,6 +12,15 @@ db_config = {
     "port": "3306",
     "user": "nilesh",
     "password": "1234", 
+    "database": "cyber_logs"
+}
+
+# --- NAYA: 2. AWS DB Config yahan add karein ---
+aws_db_config = {
+    "host": "cyber-ids-db.cnaywaeomc7q.ap-south-1.rds.amazonaws.com",  # <-- Apna AWS URL daalein
+    "port": "3306",
+    "user": "admin",                            # <-- AWS Username
+    "password": "Backup.db$2026",           # <-- AWS Password
     "database": "cyber_logs"
 }
 
@@ -37,6 +47,17 @@ except:
 
 # Helpers
 port_map = {80: 'http', 443: 'http', 22: 'ssh', 21: 'ftp', 3306: 'sql'}
+
+# --- NAYA: 3. IPS Function yahan add karein ---
+def block_ip(ip_address):
+    # Local loopback ya safe IPs ko block mat karna
+    if ip_address == "127.0.0.1" or ip_address.startswith("192.168."):
+        return
+    try:
+        print(f"🚫 IPS ACTION: Blocking {ip_address} via iptables...")
+        subprocess.run(["iptables", "-A", "INPUT", "-s", ip_address, "-j", "DROP"], check=True)
+    except Exception as e:
+        print(f"❌ IPS Error: {e}")
 
 def process_packet(packet):
     if not packet.haslayer(IP): return
@@ -76,18 +97,35 @@ def process_packet(packet):
         # Ye line 'if' se thodi aage honi chahiye
             ANOMALIES.inc()
             print(f"🚨 ANOMALY: {src_ip} | Size: {size}")
+            
+        # --- NAYA: 4. IPS Trigger karein ---
+        block_ip(src_ip)
+        
+        # SQL query aur values common rakh lete hain
+        sql = "INSERT INTO attacks (ip_address, packet_size, status) VALUES (%s, %s, %s)"
+        val = (src_ip, size, "High Risk Attack")
 
+        # --- NAYA: 5. LOCAL DB me save ---
         try:
             conn = mysql.connector.connect(**db_config)
             cursor = conn.cursor()
-            sql = "INSERT INTO attacks (ip_address, packet_size, status) VALUES (%s, %s, %s)"
-            val = (src_ip, size, "High Risk Attack")
             cursor.execute(sql, val)
             conn.commit()
-            print("💾 Log Saved!")
+            print("💾 Log Saved Local!")
             conn.close()
         except Exception as e:
-            print(f"❌ DB Error: {e}")
+            print(f"❌ Local DB Error: {e}")
+
+        # --- NAYA: 6. AWS DB me save ---
+        try:
+            conn_aws = mysql.connector.connect(**aws_db_config)
+            cursor_aws = conn_aws.cursor()
+            cursor_aws.execute(sql, val)
+            conn_aws.commit()
+            print("☁️ Log Saved to AWS!")
+            conn_aws.close()
+        except Exception as e:
+            print(f"⚠️ AWS Error (Skipped): {e}")
 
         else:
             print(f"✅ Normal: {src_ip}", end="\r")
@@ -97,3 +135,4 @@ def process_packet(packet):
 
 print("📡 Sniffer Started! Metrics available at http://localhost:8000")
 sniff(iface="lo",filter="ip", prn=process_packet, count=0)
+
